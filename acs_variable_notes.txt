@@ -1,0 +1,39 @@
+ACS Tables:
+All person-level tables target 16 years and older
+S0802 does not include unemployed, is all 16+
+S0801 has commute mode
+
+==============PERSON==============
+-Age
+    S0802
+    AGEP
+
+-Gender
+    S0802
+    SEX
+
+-Race
+    S0802
+    RAC1P
+
+-Employment Status
+    DP03
+    COW
+
+-Income
+    S0802 (personal)
+    PINCP
+
+-Education
+    S1501 (25 years and older only)
+    SCHL
+
+
+==============HOUSEHOLD==============
+-HH Size
+    B08201
+    NP
+
+-Vehicles
+    B08201
+    VEH
