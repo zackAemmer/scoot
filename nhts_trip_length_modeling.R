@@ -21,7 +21,7 @@ mturk_data_1 = read.csv('./data/tripinfo1218.csv')
 mturk_data = read.csv('./data/scoot_mturk_2r_tripinfo.csv')
 
 # # Get geocoded locations for mturk cross streets
-# register_google(key="AIzaSyC7yJXuITtdnXgy-9CypNsXZqWCmmzfZtQ")
+# register_google(key=Sys.getenv(MAPS_API_KEY))
 # mturk_data['origin'] = paste0(mturk_data$ox1, " and ", mturk_data$ox2, ", ", mturk_data$ocity, ", ", mturk_data$ostate)
 # mturk_data['destination'] = paste0(mturk_data$dx1, " and ", mturk_data$dx2, ", ", mturk_data$dcity, ", ", mturk_data$dstate)
 # mturk_origins_geocoded = geocode(mturk_data$origin)
