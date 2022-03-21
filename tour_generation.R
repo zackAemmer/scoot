@@ -13,12 +13,14 @@ library(profvis)
 library(data.table)
 library(foreach)
 library(doParallel)
+library(doSNOW)
 
-setwd('/Users/zack/Desktop/stl/scoot')
+# setwd('/Users/zack/Desktop/stl/scoot')
 
 
 # Read NHTS
-trip_data = read.csv('/Volumes/GoogleDrive-100069302124626889369/My Drive/STL/Datasets/NHTS/trippub.csv')
+# trip_data = read.csv('/Volumes/GoogleDrive-100069302124626889369/My Drive/STL/Datasets/NHTS/trippub.csv')
+trip_data = read.csv('G:/My Drive/STL/Datasets/NHTS/trippub.csv')
 # hh_data = read.csv('/Volumes/GoogleDrive-100069302124626889369/My Drive/STL/Datasets/NHTS/hhpub.csv')
 # veh_data = read.csv('/Volumes/GoogleDrive-100069302124626889369/My Drive/STL/Datasets/NHTS/vehpub.csv')
 
@@ -241,21 +243,30 @@ rm(X,Xy,Xy_train,Xy_test,y, transition_matrix,accuracy,
 
 #### Tour Destination Tracts Generation ####
 
-# Set up database
-trip_data = as.data.table(trip_data)
-main_con = dbConnect(
-  Postgres(),
-  host = Sys.getenv("MAIN_HOST"),
-  dbname = Sys.getenv("MAIN_DB"),
-  user = Sys.getenv("MAIN_USER"),
-  password = Sys.getenv("MAIN_PWD"),
-  port = Sys.getenv("MAIN_PORT")
-)
-generated_tours = tour_data[sample(nrow(tour_data), 100),] # Sample from NHTS for testing
+host = Sys.getenv("MAIN_HOST")
+dbname = Sys.getenv("MAIN_DB")
+user = Sys.getenv("MAIN_USER")
+password = Sys.getenv("MAIN_PWD")
+port = Sys.getenv("MAIN_PORT")
 
+# Need to reduce by magnitude of 3
+# 150000000/100*7/60/24
+# Likes to get stuck sometimes (check number of trips)
+
+# Sample from NHTS for testing
+trip_data = as.data.table(trip_data)
+generated_tours = tour_data[sample(nrow(tour_data), 100),]
 
 # Function to filter to relevant NHTS trips and choose destination tracts for each
-assignTracts = function(i, generated_tours, trip_data) {
+assignTracts = function(i, generated_tours, trip_data, host, dbname, user, password, port) {
+  main_con = dbConnect(
+    Postgres(),
+    host = host,
+    dbname = dbname,
+    user = user,
+    password = password,
+    port = port
+  )
   # Get the set of NHTS trips corresponding to generated tour
   tour_id = generated_tours[i,]$TOURID
   house_id = substr(tour_id, 0, 8)
@@ -286,87 +297,67 @@ assignTracts = function(i, generated_tours, trip_data) {
       FROM otract
       JOIN msa_puma_tract_join AS dtract
       ON ST_INTERSECTS(otract.geom_buffered, dtract.geom)")
+    
     dtracts = dbGetQuery(main_con, query)
     # Select destination tract at random
     current_tract = dtracts[sample(nrow(dtracts), 1),]
   }
+  dbDisconnect(main_con)
   return (tour_tracts)
 }
 
-# Set up parallel
+# Sequential Implementation
+# 54 sec/10
+# 528 sec/100
+start_time = Sys.time()
+generated_tracts = vector(mode='list', length=100)
+for (i in 1:nrow(generated_tours)) {
+  print(i)
+  generated_tracts[[i]] = assignTracts(i,
+                                       generated_tours,
+                                       trip_data,
+                                       host=host,
+                                       dbname=dbname,
+                                       user=user,
+                                       password=password,
+                                       port=port)
+}
+print("Sequential")
+seq_time = Sys.time() - start_time
+print(seq_time)
+
+
+# Parallel Implementation
+# 37 sec/10
+# 645 sec/100
+start_time = Sys.time()
 numCores = detectCores()
 cl = makeCluster(numCores-1)
 registerDoSNOW(cl)
-
-# Initialize database connection on each cluster
 clusterEvalQ(cl, {
   library(DBI)
   library(RPostgres)
-  main_con = dbConnect(
-    Postgres(),
-    host = Sys.getenv("MAIN_HOST"),
-    dbname = Sys.getenv("MAIN_DB"),
-    user = Sys.getenv("MAIN_USER"),
-    password = Sys.getenv("MAIN_PWD"),
-    port = Sys.getenv("MAIN_PORT")
-  )
+  # main_con = dbConnect(
+  #   Postgres(),
+  #   host = Sys.getenv("MAIN_HOST"),
+  #   dbname = Sys.getenv("MAIN_DB"),
+  #   user = Sys.getenv("MAIN_USER"),
+  #   password = Sys.getenv("MAIN_PWD"),
+  #   port = Sys.getenv("MAIN_PORT")
+  # )
   NULL
 })
-
-# Each process gets nhts data, tour data, i; then calculates the destination tracts
 generated_tracts = foreach (i=1:nrow(generated_tours)) %dopar% {
-  assignTracts(i, generated_tours, trip_data)
+  assignTracts(i,
+               generated_tours,
+               trip_data,
+               host=host,
+               dbname=dbname,
+               user=user,
+               password=password,
+               port=port)
 }
 stopCluster(cl)
-
-# 13:35:01
-# 13:41:51
-# 7 min per 100
-# Need to reduce by magnitude of 3
-# 150000000/100*7/60/24
-# Likes to get stuck sometimes (check number of trips)
-# system.time({
-#   generated_tracts = vector(mode='list', length=100)
-#   for (i in 1:nrow(generated_tours)) {
-#     print(i)
-#     
-#     # Get the set of NHTS trips corresponding to generated tour
-#     tour_id = generated_tours[i,]$TOURID
-#     house_id = substr(tour_id, 0, 8)
-#     person_id = substr(tour_id, 9, nchar(tour_id))
-#     nhts_tour = trip_data[(trip_data$HOUSEID==house_id & trip_data$PERSONID==person_id),]
-#     nhts_tour = nhts_tour[order(nhts_tour$TDTRPNUM),]
-#     home_tract = "53009001400"
-#     tour_tracts = c()
-#     current_tract = home_tract
-#     
-#     # Choose a tract for each trip in the tour
-#     for (j in 1:nrow(nhts_tour)) {
-#       if (j==nrow(nhts_tour)) {
-#         tour_tracts = c(tour_tracts, home_tract) # Always end at home
-#         break
-#       } else {
-#         tour_tracts = c(tour_tracts, current_tract)
-#       }
-#       # Get buffered tract intersects to choose from
-#       buffer_dist = nhts_tour[j,]$TRPMILES * 1609/111*.001 # Miles to meters to degrees
-#       geoid = current_tract
-#       query = paste0("
-#       WITH otract AS (
-#         SELECT ST_BUFFER(geom, ",buffer_dist,") AS geom_buffered
-#         FROM msa_puma_tract_join
-#         WHERE geoid = '",geoid,"')
-#       SELECT dtract.geoid
-#       FROM otract
-#       JOIN msa_puma_tract_join AS dtract
-#       ON ST_INTERSECTS(otract.geom_buffered, dtract.geom)")
-#       dtracts = dbGetQuery(main_con, query)
-#       # Select destination tract at random
-#       current_tract = dtracts[sample(nrow(dtracts), 1),]
-#     }
-#     
-#     # Store the set of destination tracts for a given tour
-#     generated_tracts[[i]] = tour_tracts
-#   }
-#   dbDisconnect(main_con)
-# })
+print("Parallel")
+par_time = Sys.time() - start_time
+print(par_time)
