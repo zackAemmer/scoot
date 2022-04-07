@@ -1,3 +1,6 @@
+.ipynb_checkpoints/*
+data/*
+populationsim-master/*
 secret.*
 config.*
 .DS_Store
