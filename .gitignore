@@ -4,3 +4,4 @@ populationsim-master/*
 secret.*
 config.*
 .DS_Store
+create_tract_table.sql
