@@ -14,6 +14,8 @@ library(data.table)
 library(foreach)
 library(doParallel)
 library(doSNOW)
+library(SWKM)
+library(mefa)
 
 
 setwd('/Users/zack/Desktop/stl/scoot')
@@ -146,14 +148,13 @@ tour_data = data.frame(paste0(all_data$HOUSEID,all_data$PERSONID),
                        all_data$n_HBSOCREC,
                        all_data$n_HBW,
                        all_data$n_NHB)
-
 # Get total distance in each tour
-tour_stats = trip_data %>%
+data = trip_data %>%
   group_by(HOUSEID,PERSONID) %>%
   summarise(
     dist = sum(TRPMILES),
   )
-tour_data$dist = tour_stats$dist
+tour_data$dist = data$dist
 
 # # Get weekend or not
 # tour_weekend = trip_data %>%
@@ -178,12 +179,20 @@ tour_span$STRTTIME = as.numeric(substr(tour_span$STRTTIME, 1, 2)) * 60 + as.nume
 tour_data$start_time_cos = cos(2 * pi * tour_span$STRTTIME / 1440)
 tour_data$start_time_sin = sin(2 * pi * tour_span$STRTTIME / 1440)
 
+# Get tour weights
+data = trip_data %>%
+  group_by(HOUSEID,PERSONID) %>%
+  arrange(WTTRDFIN) %>%
+  filter(row_number()==1) %>%
+  select(HOUSEID,PERSONID,WTTRDFIN)
+tour_data$weight = data$WTTRDFIN
+
 # Label columns
-colnames(tour_data) = c("TOURID","n_HBO","n_HBSHOP","n_HBSOCREC","n_HBW","n_NHB","dist_mi","start_time_cos","start_time_sin")
-rm(data, all_data, tour_stats, purpose, trip_purposes, tour_span)
+colnames(tour_data) = c("TOURID","n_HBO","n_HBSHOP","n_HBSOCREC","n_HBW","n_NHB","dist_mi","start_time_cos","start_time_sin","weight")
+rm(data, all_data, purpose, trip_purposes, tour_span)
 
 # Features
-X = tour_data[,2:ncol(tour_data)]
+X = tour_data[,2:(ncol(tour_data)-1)]
 
 # Cluster tours
 # Standardize or normalize columns
@@ -192,15 +201,43 @@ standardize = function(x) {
   return (z)
 }
 X = apply(X, 2, standardize)
-y = kmeans(X, centers=3, nstart=100)
-fviz_cluster(y,
-             data = X,
+
+# The weights in NHTS are too large to load in RAM; scale by lowest
+min_weight = min(tour_data$weight)
+tour_data$weight = tour_data$weight / min_weight
+X = data.frame(X)
+X_cluster = rep(X, tour_data$weight)
+
+# Sampling essential to run the number of clusters analysis
+set.seed(42)
+wcss = vector()
+# Check within cluster sum of squares to get number of clusters
+X_cluster = X_cluster[sample(nrow(X_cluster), 200000),]
+for (i in 1:10) wcss[i] = sum(kmeans(X_cluster, i, nstart=20)$withinss)
+plot(1:10,
+     wcss,
+     type = 'b', # for lines and points
+     main = paste('Optimal Number of Clusters'),
+     xlab = 'Number of clusters',
+     ylab = 'WCSS')
+
+# Run clustering (7 clusters)
+y_cluster = kmeans(X_cluster, centers=7, nstart=1)
+fviz_cluster(y_cluster,
+             data = X_cluster,
              geom="point",
              ggtheme=theme_bw())
-table(y$cluster)
+table(y_cluster$cluster)
 
 # Assign a cluster to every NHTS tour
-tour_data$cluster = y$cluster
+predict_cluster <- function(x, centers) {
+  # compute squared euclidean distance from each sample to each cluster center
+  tmp <- sapply(seq_len(nrow(x)),
+                function(i) apply(centers, 1,
+                                  function(v) sum((x[i, ]-v)^2)))
+  max.col(-t(tmp))  # find index of min distance
+}
+tour_data$cluster = predict_cluster(X, y_cluster[['centers']])
 
 # Model cluster as a factor of socioeconomic characteristics
 # Count of categorical vars
@@ -226,17 +263,26 @@ num_numeric = 7 # first n columns to be standardized
 X = X[,3:ncol(X)] # Drop ID variables
 X[,1:num_numeric] = apply(X[,1:num_numeric], 2, standardize)
 
-# MNL Regression
-Xy = data.frame(X,y$cluster)
-split = as.integer(0.8 * nrow(Xy))
-Xy_train = Xy[1:split,]
-Xy_test = Xy[split:nrow(Xy),]
-mnl_cluster_model = multinom(y.cluster~age+edu+size+veh+inc, data=Xy_train)
-y_pred = as.integer(predict(mnl_cluster_model, Xy_test))
-accuracy = sum(y_pred == Xy_test[,ncol(Xy_test)]) / nrow(Xy_test)
+# MNL Regression with 10-fold validation
+k_fold_accuracies = c()
+data_len = nrow(X)
+for (i in seq(0,.9,.1)) {
+  print(i)
+  start_idx = i*data_len
+  end_idx = (i+.1)*data_len
+  Xy = data.frame(X,tour_data$cluster)
+  Xy_train = Xy[-(start_idx:end_idx),]
+  Xy_test = Xy[(start_idx:end_idx),]
+  mnl_cluster_model = multinom(tour_data.cluster~age+edu+size+veh+inc, data=Xy_train)
+  y_pred = as.integer(predict(mnl_cluster_model, Xy_test))
+  accuracy = sum(y_pred == Xy_test[,ncol(Xy_test)]) / nrow(Xy_test)
+  k_fold_accuracies = c(k_fold_accuracies, accuracy)
+}
+mean(k_fold_accuracies)
 summary(mnl_cluster_model)
 
-rm(X,Xy,Xy_train,Xy_test,y,accuracy,split,y_pred)
+rm(i,data_len,end_idx,num_numeric,min_weight,X,Xy,Xy_test,y,y_pred,Xy_train,X_cluster,y_cluster,wcss)
+
 
 # Predict tour cluster for popsim data
 # Recode survey variables to match NHTS (on which MNL model must be trained)
@@ -255,29 +301,33 @@ popsim_data$hhincome_nhts[popsim_data$hhincome_nhts==9] = 8 # No way to do
 popsim_data$hhincome_nhts[popsim_data$hhincome_nhts==9] = 8 # No way to do
 popsim_data$hhincome_nhts[popsim_data$hhincome_nhts==12] = 11
 
-X = data.frame(popsim_data$age, popsim_data$edu_nhts, popsim_data$hhsize, popsim_data$veh, popsim_data$hhincome_nhts)
+
+# How many tours to generate? (Samples from synthetic population)
+n_tours = 1000
+popsim_data_sample = popsim_data[sample(nrow(popsim_data), n_tours),]
+
+# Standardize and make cluster predictions
+X = data.frame(popsim_data_sample$age, popsim_data_sample$edu_nhts, popsim_data_sample$hhsize, popsim_data_sample$veh, popsim_data_sample$hhincome_nhts)
 colnames(X) = c("age","edu","size","veh","inc")
-
-# Standardize and make predictions
 X = apply(X, 2, standardize)
-y_pred = as.integer(predict(mnl_cluster_model, X))
-popsim_data$cluster_id = y_pred
+y_pred_prob = predict(mnl_cluster_model, X, type="probs")
+y_pred_class = c()
+for (i in 1:nrow(y_pred_prob)) {
+  y_pred_class = c(y_pred_class, sample(seq(1,7,1), size=1, prob=y_pred_prob[i,]))
+}
+popsim_data_sample$cluster_id = y_pred_class
 
-# Sample tour from corresponding NHTS cluster
+# Sample matching cluster tours
 sample_tour = function(cluster_id) {
   possible_tours = tour_data[tour_data$cluster==cluster_id,]
   tour = possible_tours[sample(nrow(possible_tours), 1),]
   tour_id = tour$TOURID
   return (tour_id)
 }
-
-rm(X,num_numeric,y_pred)
-
-# How many tours to generate?
-n_tours = 150
-popsim_data_sample = popsim_data[sample(nrow(popsim_data), n_tours),]
 popsim_data_sample$tour_id = sapply(popsim_data_sample$cluster_id, sample_tour)
 popsim_data_sample = merge(popsim_data_sample, tour_data, by.x="tour_id", by.y="TOURID")
+
+rm(X,y_pred_prob,i,y_pred_class)
 
 
 #### Tour Destination Tracts Generation ####
@@ -319,13 +369,13 @@ assignTracts = function(i, popsim_data_sample, trip_data, host, dbname, user, pa
       geoid = current_tract
       query = paste0("
       WITH otract AS (
-        SELECT ST_BUFFER(geom, ",buffer_dist,") AS geom_buffered
+        SELECT ST_Buffer(ST_Centroid(geom), ",buffer_dist,") AS geom_buffered
         FROM msa_puma_tract_join
         WHERE geoid = '",geoid,"')
       SELECT dtract.geoid
       FROM otract
       JOIN msa_puma_tract_join AS dtract
-      ON ST_INTERSECTS(otract.geom_buffered, dtract.geom)")
+      ON ST_Intersects(otract.geom_buffered, dtract.geom)")
       dtracts = dbGetQuery(main_con, query)
 
       # Select destination tract at random
@@ -338,8 +388,7 @@ assignTracts = function(i, popsim_data_sample, trip_data, host, dbname, user, pa
 }
 
 # Sequential Implementation
-# 54 sec/10
-# 528 sec/100
+# 1hr/1000
 start_time = Sys.time()
 generated_tracts = vector(mode='list', length=nrow(popsim_data_sample))
 for (i in 1:nrow(popsim_data_sample)) {
