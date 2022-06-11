@@ -10,7 +10,7 @@ DCA,S,Skip,Dockless,,https://us-central1-waybots-production.cloudfunctions.net/d
 DCA,S,Spin,Dockless,GBFS,https://gbfs.spin.pm/api/gbfs/v1/washington_dc/gbfs.json,data,Y,,
 BOS,B,BlueBike,Dock,GBFS,http://gbfs.bluebikes.com/gbfs/gbfs.json,data,N,,Their feed is empty. They publish quarterly trip counts here: https://www.bluebikes.com/system-data
 AUS,B,Wheels,Dockless,GBFS,https://austin-gbfs.getwheelsapp.com/gbfs.json,,Y,,
-AUS,S,Ojo,Dockless,GBFS,https://api.ojoelectric.com/api/mds/gbfs.json,,Y,,
+AUS,S,Ojo,Dockless,GBFS,https://api.ojoelectric.com/api/mds/gbfs.json,,N,,
 AUS,S,Spin,Dockless,GBFS,https://gbfs.spin.pm/api/gbfs/v2_2/austin/gbfs,,Y,,
 AUS,B,B_Cycle,Dock,GBFS,https://gbfs.bcycle.com/bcycle_austin/gbfs.json,,Y,,
 AUS,S,Link,Dockless,GBFS,https://wrangler-mds-production.herokuapp.com/gbfs/Austin/gbfs.json,,Y,,

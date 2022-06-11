@@ -11,16 +11,24 @@ library(DBI)
 library(RPostgres)
 library(profvis)
 library(data.table)
-library(foreach)
-library(doParallel)
-library(doSNOW)
 library(SWKM)
 library(mefa)
+library(foreach)
+library(doParallel)
 
 
 setwd('/Users/zack/Desktop/stl/scoot')
 
 
+source('secret.R')
+host = Sys.getenv("MAIN_HOST")
+dbname = Sys.getenv("MAIN_DB")
+user = Sys.getenv("MAIN_USER")
+password = Sys.getenv("MAIN_PWD")
+port = Sys.getenv("MAIN_PORT")
+
+
+### Modeling ####
 # Read NHTS
 # trip_data = read.csv('/Volumes/GoogleDrive-100069302124626889369/My Drive/STL/Datasets/NHTS/trippub.csv')
 trip_data = read.csv('/Users/zack/Library/CloudStorage/GoogleDrive-zae5op@uw.edu/My Drive/STL/Datasets/NHTS/trippub.csv')
@@ -28,7 +36,9 @@ trip_data = read.csv('/Users/zack/Library/CloudStorage/GoogleDrive-zae5op@uw.edu
 # veh_data = read.csv('/Volumes/GoogleDrive-100069302124626889369/My Drive/STL/Datasets/NHTS/vehpub.csv')
 
 # Read Synthetic pop
-popsim_data = read.csv('./populationsim-master/example_msa_survey/combined_stats/popsim_sample.csv')
+# popsim_data = read.csv('./populationsim-master/example_msa_survey/combined_stats/popsim_sample.csv')
+# saveRDS(popsim_data, './populationsim-master/example_msa_survey/combined_stats/popsim_sample.rds')
+popsim_data = readRDS('./populationsim-master/example_msa_survey/combined_stats/popsim_sample.rds')
 popsim_data$TRACT = str_pad(popsim_data$TRACT, 11, pad='0')
 
 # Read shapes
@@ -40,7 +50,7 @@ trip_data = trip_data[trip_data$TRIPPURP != -9,]
 trip_data = trip_data[trip_data$TDWKND != 1,]
 
 
-# #### Bottom Up Approach ####
+#### Bottom Up Approach ####
 # # Can look at WHYTRP1S for categorizing trips inspiration
 # data = data.frame(paste0(trip_data$HOUSEID,trip_data$PERSONID),trip_data$WHYFROM,trip_data$WHYTO)
 # colnames(data) = c('ID','WHYFROM','WHYTO')
@@ -331,14 +341,31 @@ rm(X,y_pred_prob,i,y_pred_class)
 
 
 #### Tour Destination Tracts Generation ####
-host = Sys.getenv("MAIN_HOST")
-dbname = Sys.getenv("MAIN_DB")
-user = Sys.getenv("MAIN_USER")
-password = Sys.getenv("MAIN_PWD")
-port = Sys.getenv("MAIN_PORT")
+# save.image(file="checkpoint.RData")
+load("checkpoint.RData")
+
+# Precalculate lookup table of NHTS tours
+nhts_lookup = list()
+for (i in 1:nrow(popsim_data_sample)) {
+  # Get the set of NHTS trips corresponding to generated tour
+  tour_id = popsim_data_sample$tour_id[i]
+  nhts_tour = trip_data %>%
+    filter(
+      HOUSEID==substr(tour_id, 0, 8),
+      PERSONID==substr(tour_id, 9, nchar(tour_id))
+    ) %>%
+    arrange(
+      TDTRPNUM
+    ) %>%
+    mutate(
+      buffer_dist = TRPMILES/69 # Miles to meters to degrees
+    )
+  nhts_tour = nhts_tour[order(nhts_tour$TDTRPNUM),]
+  nhts_lookup[[tour_id]] = nhts_tour
+}
 
 # Function to filter to relevant NHTS trips and choose destination tracts for each
-assignTracts = function(i, popsim_data_sample, trip_data, host, dbname, user, password, port) {
+assignTracts = function(tour_ids, home_tracts, nhts_lookup, host, dbname, user, password, port) {
   main_con = dbConnect(
     Postgres(),
     host = host,
@@ -347,26 +374,20 @@ assignTracts = function(i, popsim_data_sample, trip_data, host, dbname, user, pa
     password = password,
     port = port
   )
-  # Get the set of NHTS trips corresponding to generated tour
-  tour_id = popsim_data_sample[i,]$tour_id
-  house_id = substr(tour_id, 0, 8)
-  person_id = substr(tour_id, 9, nchar(tour_id))
-  nhts_tour = trip_data[(trip_data$HOUSEID==house_id & trip_data$PERSONID==person_id),]
-  nhts_tour = nhts_tour[order(nhts_tour$TDTRPNUM),]
-  home_tract = popsim_data_sample[i,]$TRACT
-  tour_tracts = c()
-  current_tract = home_tract
-  
-  # Choose a tract for each trip in the tour
-  for (j in 1:nrow(nhts_tour)) {
-    # Always end at home
-    if (j==nrow(nhts_tour)) {
-      tour_tracts = c(tour_tracts, home_tract)
-      break
-    } else {
+  result = c()
+  # return(length(tour_ids))
+  for (j in 1:length(tour_ids)) {
+    tour_id = tour_ids[j]
+    home_tract = home_tracts[j]
+    nhts_tour = nhts_lookup[[tour_id]]
+    tour_tracts = c()
+    current_tract = home_tract
+    
+    # Choose a tract for each trip in the tour
+    for (k in 1:nrow(nhts_tour)) {
       # Get buffered tract intersects to choose from
-      buffer_dist = nhts_tour[j,]$TRPMILES/69 # Miles to meters to degrees
       geoid = current_tract
+      buffer_dist = nhts_tour$buffer_dist[k]
       query = paste0("
       WITH otract AS (
         SELECT ST_Buffer(ST_Centroid(geom), ",buffer_dist,") AS geom_buffered
@@ -377,71 +398,56 @@ assignTracts = function(i, popsim_data_sample, trip_data, host, dbname, user, pa
       JOIN msa_puma_tract_join AS dtract
       ON ST_Intersects(otract.geom_buffered, dtract.geom)")
       dtracts = dbGetQuery(main_con, query)
-
+      
       # Select destination tract at random
       current_tract = dtracts[sample(nrow(dtracts), 1),]
       tour_tracts = c(tour_tracts, current_tract)
     }
+    # Always end at home
+    tour_tracts = c(tour_tracts, home_tract)
+    result = c(result, tour_tracts)
   }
   dbDisconnect(main_con)
-  return (tour_tracts)
+  return (result)
 }
+
+# Parallel Implementation
+# 3min/1000 = 14 days
+data_chunks = 7
+parallel_data = split(popsim_data_sample, rep(1:data_chunks, length.out = nrow(popsim_data_sample), each = ceiling(nrow(popsim_data_sample)/data_chunks)))
+
+start_time = Sys.time()
+num_cores = detectCores()-1
+cl = makeCluster(num_cores, type="PSOCK", outfile="debug.txt")
+registerDoParallel(cl)
+clusterEvalQ(cl, {
+  library(DBI)
+  library(RPostgres)
+  NULL
+})
+generated_tracts = foreach(i=1:length(parallel_data)) %dopar% {
+  assignTracts(parallel_data[[i]]$tour_id,
+               parallel_data[[i]]$TRACT,
+               nhts_lookup=nhts_lookup,
+               host=host,
+               dbname=dbname,
+               user=user,
+               password=password,
+               port=port)
+}
+stopCluster(cl)
+print(Sys.time() - start_time)
 
 # Sequential Implementation
-# 1hr/1000
-start_time = Sys.time()
-generated_tracts = vector(mode='list', length=nrow(popsim_data_sample))
-for (i in 1:nrow(popsim_data_sample)) {
-  print(i)
-  generated_tracts[[i]] = assignTracts(i,
-                                       popsim_data_sample,
-                                       trip_data,
-                                       host=host,
-                                       dbname=dbname,
-                                       user=user,
-                                       password=password,
-                                       port=port)
-}
-print("Sequential")
-seq_time = Sys.time() - start_time
-print(seq_time)
-
-
-# # Parallel Implementation
-# # 37 sec/10
-# # 645 sec/100
-# start_time = Sys.time()
-# numCores = detectCores()
-# cl = makeCluster(numCores-1)
-# registerDoSNOW(cl)
-# clusterEvalQ(cl, {
-#   library(DBI)
-#   library(RPostgres)
-#   # main_con = dbConnect(
-#   #   Postgres(),
-#   #   host = Sys.getenv("MAIN_HOST"),
-#   #   dbname = Sys.getenv("MAIN_DB"),
-#   #   user = Sys.getenv("MAIN_USER"),
-#   #   password = Sys.getenv("MAIN_PWD"),
-#   #   port = Sys.getenv("MAIN_PORT")
-#   # )
-#   NULL
-# })
-# generated_tracts = foreach (i=1:nrow(generated_tours)) %dopar% {
-#   assignTracts(i,
-#                generated_tours,
-#                trip_data,
-#                host=host,
-#                dbname=dbname,
-#                user=user,
-#                password=password,
-#                port=port)
+# 67971 tracts * 100 persons = 6,797,100 tours = 70 days
+# * 4 avg trips/tour = 27,188,400 trips
+# 15min/1000
+# generated_tracts = vector(mode='list', length=nrow(popsim_data_sample))
+# for (i in 1:(nrow(popsim_data_sample)-0)) {
+#   print(i)
+#   generated_tracts[[i]] = assignTracts(popsim_data_sample$tour_id[i],
+#                                        popsim_data_sample$TRACT[i])
 # }
-# stopCluster(cl)
-# print("Parallel")
-# par_time = Sys.time() - start_time
-# print(par_time)
-
 
 # Clean up and save
 drops <- c("X","index","household_id","start_time_cos","start_time_sin","cluster")

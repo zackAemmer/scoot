@@ -51,7 +51,7 @@ def upload_to_rds(to_upload, conn, database, col_names, additional_vals):
             query_str = f'INSERT INTO {database} ({",".join(col_names+list(additional_vals.keys()))}) VALUES ' + args_str
             curs.execute(query_str)
             conn.commit()
-            print(f"Success uploading {len(to_upload_list)} rows {additional_vals} to {database}")
+            # print(f"Success uploading {len(to_upload_list)} rows {additional_vals} to {database}")
         except Exception as e:
             # Catch all errors and continue to keep server up and running
             if len(to_upload_list) == 0:
@@ -67,7 +67,7 @@ def main_function():
     # Connect to RDS and get time of collection
     conn = connect_to_rds()
     current_hour, current_epoch = get_epoch_and_pst_24hr()
-    print(f"Current epoch: {current_epoch}")
+    # print(f"Current epoch: {current_epoch}")
 
     # # Connect S3 and get list of micromobility API endpoints to inventory
     # session = boto3.Session(
@@ -81,7 +81,7 @@ def main_function():
     endpoint_list = pd.read_csv('./endpoints.csv')
     endpoint_list = endpoint_list[endpoint_list['Note']=='GBFS']
     endpoint_list = endpoint_list[endpoint_list['try']!='N']
-    print(f"Querying endpoints: \n{endpoint_list}")
+    # print(f"Querying endpoints: \n{endpoint_list}")
 
     # Iterate through all data sources in the list
     for i, row in endpoint_list.iterrows():
@@ -99,7 +99,7 @@ def main_function():
                 data = pd.DataFrame(data)
                 # Some use t/f instead of 1/0
                 if data.shape[0] == 0:
-                    print(f"{city}, {operator} has feed but no free float bikes")
+                    # print(f"{city}, {operator} has feed but no free float bikes")
                     continue
                 data[data['is_disabled']==True] = 1
                 data[data['is_reserved']==False] = 0
@@ -113,7 +113,7 @@ def main_function():
                 data = call_endpoint(feed['url'])['data']['stations']
                 data = pd.DataFrame(data)
                 if data.shape[0] == 0:
-                    print(f"{city}, {operator} has feed but no station bikes")
+                    # print(f"{city}, {operator} has feed but no station bikes")
                     continue
                 upload_to_rds(data,
                     conn,
